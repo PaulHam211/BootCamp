@@ -167,8 +167,8 @@ void processGamepad(GamepadPtr gp, unsigned controllerIndex) {
                 
                 // Only log once when the D-pad value changes, not on every rumble
                 if (lastDpadValue != gamepadState->dpad) {
-                    Serial.printf("Dump truck bed %s - continuous rumble\n", 
-                                (gamepadState->dpad == 0x01) ? "raising" : "lowering");
+                    //Serial.printf("Dump truck bed %s - continuous rumble\n", 
+                    //            (gamepadState->dpad == 0x01) ? "raising" : "lowering");
                     lastDpadValue = gamepadState->dpad;
                 }
                 
