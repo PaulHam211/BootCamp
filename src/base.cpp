@@ -76,6 +76,8 @@ uint8_t lastControllerAddr[6] = {0}; // To store last controller's Bluetooth add
 bool hasLastController = false;      // Flag to indicate if we have stored a controller
 
 ControllerPtr myControllers[BP32_MAX_GAMEPADS];
+// Track connection time for each controller to handle initialization period
+unsigned long controllerConnectTime[BP32_MAX_GAMEPADS] = {0};
 // Structure to hold controller state
 struct ControllerState {
     uint32_t receiverIndex;
@@ -199,9 +201,26 @@ void processGamepad(GamepadPtr gp, unsigned controllerIndex) {
           } else if (gamepadState->miscButtons & controllerMapping.miscBackwardMask) {
             // Prevent going below 0 by checking before decrementing
             if (gamepadState->receiverIndex > 0)
-              gamepadState->receiverIndex--;
-          } else if (gamepadState->miscButtons & controllerMapping.miscResetMask) {
-            gamepadState->receiverIndex = 0;
+              gamepadState->receiverIndex--;          } else if (gamepadState->miscButtons & controllerMapping.miscResetMask) {
+            // Check if we're still in the initial 10-second period where we ignore PS button
+            bool isInInitialPeriod = false;
+            unsigned long currentTime = millis();
+            
+            for (int i = 0; i < BP32_MAX_GAMEPADS; i++) {
+              if (myControllers[i] == gp && (currentTime - controllerConnectTime[i] < 10000)) {
+                isInInitialPeriod = true;
+                // Debug message (only if within first 15 seconds to avoid spam)
+                if (currentTime - controllerConnectTime[i] < 15000) {
+                  Serial.printf("Ignoring PS button (elapsed: %lu ms)\n", currentTime - controllerConnectTime[i]);
+                }
+                break;
+              }
+            }
+            
+            // Only reset if not in initial period
+            if (!isInInitialPeriod) {
+              gamepadState->receiverIndex = 0;
+            }
           }
           
           // Save updated receiver index back to the shared array
@@ -253,8 +272,9 @@ void onConnectedController(ControllerPtr ctl) {
         if (j < 5) Serial.print(":");
       }
       Serial.println();
-      
-      myControllers[i] = ctl;
+        myControllers[i] = ctl;
+      controllerConnectTime[i] = millis();  // Record the connection time
+      Serial.println("Starting 10-second PS button ignore period");
       foundEmptySlot = true;
       break;
     }
