@@ -125,7 +125,7 @@ void dumpGamepadState(ControllerState *gamepadState) {
 }
 void sendGamepad(ControllerState *gamepadState) {
   esp_err_t result = esp_now_send(broadcastAddress, (uint8_t *)gamepadState, sizeof(*gamepadState));
-  //dumpGamepadState(gamepadState);
+  dumpGamepadState(gamepadState); // Print the gamepad state to the serial monitor
 }
 // Controller event callback
 void processGamepad(GamepadPtr gp, unsigned controllerIndex) {
@@ -350,47 +350,29 @@ void loop() {
   bool dataUpdated = BP32.update();
   if (dataUpdated & dataSent) {
     dataSent = false;
-    processControllers();  } else { vTaskDelay(1); }
-    // delay(100);  // Send updates every 100ms
+    processControllers();
+  } else { 
+    vTaskDelay(1);
+  }
+  // delay(100);  // Send updates every 100ms
     
-    // Check if no controllers are connected for a while, try reconnecting
-    static unsigned long lastReconnectTime = 0;
-    static bool noControllersConnected = true;
-    
-    // Check if any controllers are connected
-    noControllersConnected = true;
-    for (int i = 0; i < BP32_MAX_GAMEPADS; i++) {
-        if (myControllers[i] != nullptr && myControllers[i]->isConnected()) {
-            noControllersConnected = false;
-            break;
-        }
-    }    // If no controllers and we have last address, show periodic reminder about reconnection
-    if (noControllersConnected && hasLastController && (millis() - lastReconnectTime > 10000)) {  // Every 10 seconds
-        Serial.println("No controllers connected. Turn on your controller to reconnect automatically.");
-        lastReconnectTime = millis();
-        
-        // Count how long we've been without a controller
-        static unsigned long noControllerStartTime = millis();
-        static bool countingNoController = false;
-        
-        if (!countingNoController) {
-            countingNoController = true;
-            noControllerStartTime = millis();
-        } 
-        else if ((millis() - noControllerStartTime) > 60000) {  // After 1 minute with no controller
-            // Try restarting the Bluetooth system to improve reconnection chances
-            Serial.println("No controller for too long, restarting Bluetooth subsystem...");
-            BP32.forgetBluetoothKeys();
-            countingNoController = false;
-            
-            // We'll use esp_restart() only in extreme cases
-            // Uncomment the following line if you want a complete system restart after 5 minutes
-            // if ((millis() - noControllerStartTime) > 300000) esp_restart();
-        }
-    } else {
-        // Reset the counter when controllers are connected
-        static bool countingNoController = false;
-        countingNoController = false;
+  // Check if no controllers are connected for a while, try reconnecting
+  static unsigned long lastReconnectTime = 0;
+  static bool noControllersConnected = true;
+  
+  // Check if any controllers are connected
+  noControllersConnected = true;
+  for (int i = 0; i < BP32_MAX_GAMEPADS; i++) {
+    if (myControllers[i] != nullptr && myControllers[i]->isConnected()) {
+      noControllersConnected = false;
+      break;
     }
+  }
+  
+  // If no controllers and we have last address, show periodic reminder about reconnection
+  if (noControllersConnected && hasLastController && (millis() - lastReconnectTime > 30000)) {  // Every 30 seconds
+    Serial.println("No controllers connected. Turn on your controller to reconnect automatically.");
+    lastReconnectTime = millis();
+  }
 }
 
