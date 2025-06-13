@@ -2,6 +2,7 @@
 #include <esp_now.h>
 #include <WiFi.h>
 #include <esp_wifi.h>
+#include <Preferences.h> // For persistent storage
 
 // ============================================
 // CONTROLLER CONFIGURATION
@@ -12,10 +13,10 @@
 // 3. Upload the code to your ESP32
 //
 // For Xbox/Xbox-style controllers (original configuration):
-#define CONTROLLER_XBOX     
+// #define CONTROLLER_XBOX     
 //
 // For PS4/DualShock 4 controllers:
-// #define CONTROLLER_PS4   
+ #define CONTROLLER_PS4   
 //
 // The misc buttons are used to switch between receivers:
 // - Forward button: increment receiver index (next vehicle)
@@ -55,9 +56,9 @@ const ButtonMapping controllerMapping = {
     .buttonB = 1,           // Circle (O) button - typically mapped to B  
     .buttonX = 4,           // Square button - typically mapped to X
     .buttonY = 8,           // Triangle button - typically mapped to Y
-    .miscForwardMask = 256, // Share button (bit 8)
-    .miscBackwardMask = 512,// Options button (bit 9)
-    .miscResetMask = 1024   // PS button (bit 10)
+    .miscForwardMask = 4, // Share button
+    .miscBackwardMask = 2,// Options button
+    .miscResetMask = 1   // PS button
 };
 const char* CONTROLLER_TYPE = "PS4";
 #endif
@@ -68,6 +69,11 @@ const char* CONTROLLER_TYPE = "PS4";
 #endif
 
 // ============================================
+
+// Preferences for storing persistent data
+Preferences preferences;
+uint8_t lastControllerAddr[6] = {0}; // To store last controller's Bluetooth address
+bool hasLastController = false;      // Flag to indicate if we have stored a controller
 
 ControllerPtr myControllers[BP32_MAX_GAMEPADS];
 // Structure to hold controller state
@@ -95,7 +101,7 @@ uint8_t broadcastAddress[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 bool dataSent = true;
 
 void dumpGamepadState(ControllerState *gamepadState) {
-    Serial.printf("ID:%d | BTN:0x%04x | DPAD:0x%02x | L:%d,%d | R:%d,%d | BT:%d TH:%d | MISC:0x%02x | FWD:%d BWD:%d RST:%d | R1:%d L1:%d R2:%d L2:%d | TL:%d TR:%d\n",
+    Serial.printf("ID:%d | BTN:0x%04x | DPAD:0x%02x | L:%d,%d | R:%d,%d | BT:%d TH:%d | MISC:0x%04x | FWD:%d BWD:%d RST:%d | R1:%d L1:%d R2:%d L2:%d | TL:%d TR:%d\n",
         gamepadState->receiverIndex,
         gamepadState->buttons,
         gamepadState->dpad,
@@ -106,9 +112,9 @@ void dumpGamepadState(ControllerState *gamepadState) {
         gamepadState->brake,
         gamepadState->throttle,
         gamepadState->miscButtons,
-        gamepadState->miscButtons & controllerMapping.miscForwardMask,
-        gamepadState->miscButtons & controllerMapping.miscBackwardMask,
-        gamepadState->miscButtons & controllerMapping.miscResetMask,
+        gamepadState->miscButtons & controllerMapping.miscForwardMask ? 1 : 0,
+        gamepadState->miscButtons & controllerMapping.miscBackwardMask ? 1 : 0,
+        gamepadState->miscButtons & controllerMapping.miscResetMask ? 1 : 0,
         gamepadState->r1,
         gamepadState->l1,
         gamepadState->r2,
@@ -119,7 +125,7 @@ void dumpGamepadState(ControllerState *gamepadState) {
 }
 void sendGamepad(ControllerState *gamepadState) {
   esp_err_t result = esp_now_send(broadcastAddress, (uint8_t *)gamepadState, sizeof(*gamepadState));
-  dumpGamepadState(gamepadState);
+  //dumpGamepadState(gamepadState);
 }
 // Controller event callback
 void processGamepad(GamepadPtr gp, unsigned controllerIndex) {
@@ -142,6 +148,9 @@ void processGamepad(GamepadPtr gp, unsigned controllerIndex) {
     }
     if (gp) {
         ControllerState *gamepadState = &gamepadStates[controllerIndex];
+        // Set receiver index from the stored value
+        gamepadState->receiverIndex = *receiverIndex;
+        // Update all controller state values
         gamepadState->buttons = gp->buttons();
         gamepadState->dpad = gp->dpad();
         gamepadState->axisX = gp->axisX() - calibrationData->axisX;
@@ -155,19 +164,41 @@ void processGamepad(GamepadPtr gp, unsigned controllerIndex) {
         gamepadState->r1 = gp->r1();
         gamepadState->l1 = gp->l1();
         gamepadState->r2 = gp->r2();
-        gamepadState->l2 = gp->l2();
-
-
-        gamepadState->miscButtons = gp->miscButtons();
-        if (gamepadState->miscButtons && (millis() - miscButtonTime) > 200) {
-          if (gamepadState->miscButtons & controllerMapping.miscForwardMask) {
+        gamepadState->l2 = gp->l2();gamepadState->miscButtons = gp->miscButtons();        if (gamepadState->miscButtons && (millis() - miscButtonTime) > 200) {
+          // Store previous receiver index to detect changes
+          uint32_t previousIndex = gamepadState->receiverIndex;
+            if (gamepadState->miscButtons & controllerMapping.miscForwardMask) {
             gamepadState->receiverIndex++;
+            // Constrain to valid range (0-4)
+            if (gamepadState->receiverIndex > 4) 
+              gamepadState->receiverIndex = 4;
           } else if (gamepadState->miscButtons & controllerMapping.miscBackwardMask) {
-            gamepadState->receiverIndex--;
+            // Prevent going below 0 by checking before decrementing
+            if (gamepadState->receiverIndex > 0)
+              gamepadState->receiverIndex--;
           } else if (gamepadState->miscButtons & controllerMapping.miscResetMask) {
             gamepadState->receiverIndex = 0;
           }
-
+          
+          // Save updated receiver index back to the shared array
+          *receiverIndex = gamepadState->receiverIndex;          // Add rumble feedback when vehicle changed
+          if (previousIndex != gamepadState->receiverIndex && myControllers[controllerIndex]) {
+            // Provide haptic feedback for vehicle change
+            myControllers[controllerIndex]->playDualRumble(0, 500, 0x80, 0x40); // Rumble for 0.5 seconds
+            
+            // Display message about vehicle change with actual name
+            const char* vehicleName;
+            switch(gamepadState->receiverIndex) {
+              case 0: vehicleName = "No vehicle"; break;
+              case 1: vehicleName = "Excavator"; break;
+              case 2: vehicleName = "Forklift"; break;
+              case 3: vehicleName = "Dump Truck"; break;
+              case 4: vehicleName = "Semi-Trailer"; break;
+              default: vehicleName = "Unknown"; break;
+            }
+            Serial.printf("Switched to %s (ID: %d)\n", vehicleName, gamepadState->receiverIndex);
+          }
+          
           miscButtonTime = millis();
         }
         sendGamepad(gamepadState);
@@ -185,6 +216,20 @@ void onConnectedController(ControllerPtr ctl) {
       ControllerProperties properties = ctl->getProperties();
       Serial.printf("Controller model: %s, VID=0x%04x, PID=0x%04x\n", ctl->getModelName().c_str(), properties.vendor_id,
                     properties.product_id);
+      
+      // Save controller's Bluetooth address for reconnection
+      memcpy(lastControllerAddr, properties.btaddr, 6);
+      preferences.begin("controller", false);
+      preferences.putBytes("btaddr", lastControllerAddr, 6);
+      preferences.end();
+      
+      Serial.print("Saved controller address: ");
+      for (int j = 0; j < 6; j++) {
+        Serial.printf("%02X", lastControllerAddr[j]);
+        if (j < 5) Serial.print(":");
+      }
+      Serial.println();
+      
       myControllers[i] = ctl;
       foundEmptySlot = true;
       break;
@@ -217,17 +262,56 @@ void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
 void setup() {
     Serial.begin(115200);
     
-    // Print controller configuration
-    Serial.println("=======================================");
+    // Print controller configuration    Serial.println("=======================================");
     Serial.printf("Base Station Initialized\n");
     Serial.printf("Controller Type: %s\n", CONTROLLER_TYPE);
     Serial.printf("Forward Mask: 0x%04x\n", controllerMapping.miscForwardMask);
     Serial.printf("Backward Mask: 0x%04x\n", controllerMapping.miscBackwardMask);
     Serial.printf("Reset Mask: 0x%04x\n", controllerMapping.miscResetMask);
+    Serial.println("Available Vehicles:");
+    Serial.println("  0: No vehicle selected");
+    Serial.println("  1: Excavator");
+    Serial.println("  2: Forklift");
+    Serial.println("  3: Dump Truck");
+    Serial.println("  4: Semi-Trailer");
     Serial.println("=======================================");
+      // Initialize all receiver indexes to valid values (0)
+    for (int i = 0; i < BP32_MAX_GAMEPADS; i++) {
+        receiverIndexes[i] = 0;
+    }
+    
+    // Try to retrieve last paired controller address
+    preferences.begin("controller", true);
+    if (preferences.isKey("btaddr")) {
+        hasLastController = true;
+        preferences.getBytes("btaddr", lastControllerAddr, 6);
+        Serial.print("Found saved controller address: ");
+        for (int i = 0; i < 6; i++) {
+            Serial.printf("%02X", lastControllerAddr[i]);
+            if (i < 5) Serial.print(":");
+        }
+        Serial.println();
+    } else {
+        Serial.println("No previous controller saved");
+    }
+    preferences.end();
 
     // Initialize Bluepad32
     BP32.setup(&onConnectedController, &onDisconnectedController);
+    
+    // If we have a saved controller, try to reconnect to it
+    if (hasLastController) {
+        Serial.println("Attempting to reconnect to last paired controller...");
+        BP32.enableNewBluetoothConnections(false);
+        BP32.forgetBluetoothKeys();
+        BP32.setBluetoothEnabled(false);
+        delay(100);
+        BP32.setBluetoothEnabled(true);
+        delay(500);
+        // Request connection to previously paired device
+        BP32.reconnectBluetoothController(lastControllerAddr);
+        Serial.println("Reconnection request sent");
+    }
     // Set device as Wi-Fi station
     WiFi.mode(WIFI_STA);
 
