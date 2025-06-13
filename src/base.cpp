@@ -125,7 +125,7 @@ void dumpGamepadState(ControllerState *gamepadState) {
 }
 void sendGamepad(ControllerState *gamepadState) {
   esp_err_t result = esp_now_send(broadcastAddress, (uint8_t *)gamepadState, sizeof(*gamepadState));
-  dumpGamepadState(gamepadState); // Print the gamepad state to the serial monitor
+  //dumpGamepadState(gamepadState); // Print the gamepad state to the serial monitor
 }
 // Controller event callback
 void processGamepad(GamepadPtr gp, unsigned controllerIndex) {
@@ -151,8 +151,32 @@ void processGamepad(GamepadPtr gp, unsigned controllerIndex) {
         // Set receiver index from the stored value
         gamepadState->receiverIndex = *receiverIndex;
         // Update all controller state values
-        gamepadState->buttons = gp->buttons();
-        gamepadState->dpad = gp->dpad();
+        gamepadState->buttons = gp->buttons();        gamepadState->dpad = gp->dpad();        // Check for Dump Truck selected (ID: 3) and D-pad up/down (0x01 or 0x02) for continuous rumble feedback
+        static unsigned long lastDumpRumbleTime = 0;
+        static uint8_t lastDpadValue = 0;
+        
+        if (gamepadState->receiverIndex == 3 && 
+            (gamepadState->dpad == 0x01 || gamepadState->dpad == 0x02) && 
+            myControllers[controllerIndex]) {
+            
+            // Create continuous rumble by triggering it repeatedly while button is held
+            // Check if enough time has passed since the last rumble to trigger a new one
+            if (millis() - lastDumpRumbleTime >= 240) { // 240ms is less than the rumble duration so they overlap
+                // Provide haptic feedback for dump truck bed movement
+                myControllers[controllerIndex]->playDualRumble(0, 500, 0x80, 0x40); // Continuous rumble effect
+                
+                // Only log once when the D-pad value changes, not on every rumble
+                if (lastDpadValue != gamepadState->dpad) {
+                    Serial.printf("Dump truck bed %s - continuous rumble\n", 
+                                (gamepadState->dpad == 0x01) ? "raising" : "lowering");
+                    lastDpadValue = gamepadState->dpad;
+                }
+                
+                // Save last rumble time
+                lastDumpRumbleTime = millis();
+            }
+        }
+        
         gamepadState->axisX = gp->axisX() - calibrationData->axisX;
         gamepadState->axisY = gp->axisY() - calibrationData->axisY;
         gamepadState->axisRX = gp->axisRX() - calibrationData->axisRX;
