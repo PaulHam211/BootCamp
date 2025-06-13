@@ -298,19 +298,12 @@ void setup() {
 
     // Initialize Bluepad32
     BP32.setup(&onConnectedController, &onDisconnectedController);
-    
-    // If we have a saved controller, try to reconnect to it
+      // If we have a saved controller, we'll attempt to reconnect automatically
+    // The Bluepad32 library will handle reconnection to previously paired controllers
     if (hasLastController) {
-        Serial.println("Attempting to reconnect to last paired controller...");
-        BP32.enableNewBluetoothConnections(false);
-        BP32.forgetBluetoothKeys();
-        BP32.setBluetoothEnabled(false);
-        delay(100);
-        BP32.setBluetoothEnabled(true);
-        delay(500);
-        // Request connection to previously paired device
-        BP32.reconnectBluetoothController(lastControllerAddr);
-        Serial.println("Reconnection request sent");
+        Serial.println("Controller data loaded - Bluepad32 will attempt automatic reconnection...");
+        // Note: We can't explicitly reconnect with this version of the library
+        // It will automatically try to reconnect to previously paired controllers
     }
     // Set device as Wi-Fi station
     WiFi.mode(WIFI_STA);
@@ -357,8 +350,47 @@ void loop() {
   bool dataUpdated = BP32.update();
   if (dataUpdated & dataSent) {
     dataSent = false;
-    processControllers();
-  } else { vTaskDelay(1); }
+    processControllers();  } else { vTaskDelay(1); }
     // delay(100);  // Send updates every 100ms
+    
+    // Check if no controllers are connected for a while, try reconnecting
+    static unsigned long lastReconnectTime = 0;
+    static bool noControllersConnected = true;
+    
+    // Check if any controllers are connected
+    noControllersConnected = true;
+    for (int i = 0; i < BP32_MAX_GAMEPADS; i++) {
+        if (myControllers[i] != nullptr && myControllers[i]->isConnected()) {
+            noControllersConnected = false;
+            break;
+        }
+    }    // If no controllers and we have last address, show periodic reminder about reconnection
+    if (noControllersConnected && hasLastController && (millis() - lastReconnectTime > 10000)) {  // Every 10 seconds
+        Serial.println("No controllers connected. Turn on your controller to reconnect automatically.");
+        lastReconnectTime = millis();
+        
+        // Count how long we've been without a controller
+        static unsigned long noControllerStartTime = millis();
+        static bool countingNoController = false;
+        
+        if (!countingNoController) {
+            countingNoController = true;
+            noControllerStartTime = millis();
+        } 
+        else if ((millis() - noControllerStartTime) > 60000) {  // After 1 minute with no controller
+            // Try restarting the Bluetooth system to improve reconnection chances
+            Serial.println("No controller for too long, restarting Bluetooth subsystem...");
+            BP32.forgetBluetoothKeys();
+            countingNoController = false;
+            
+            // We'll use esp_restart() only in extreme cases
+            // Uncomment the following line if you want a complete system restart after 5 minutes
+            // if ((millis() - noControllerStartTime) > 300000) esp_restart();
+        }
+    } else {
+        // Reset the counter when controllers are connected
+        static bool countingNoController = false;
+        countingNoController = false;
+    }
 }
 
