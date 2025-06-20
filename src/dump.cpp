@@ -2,6 +2,18 @@
 #include <ESP32Servo.h>  // by Kevin Harrington
 #include <esp_now.h>
 #include <WiFi.h>
+
+// Include sound support if enabled
+#ifdef ENABLE_SOUND
+#include "../include/sound/sound_config.h"
+#ifdef ENABLE_BENFORD_SOUND
+  // Only include the header, not the implementation
+  #include "../include/sound/benford_dumper_sounds.h"
+#else
+  #include "../include/sound/dump_truck_sounds.h"
+#endif
+#endif
+
 uint32_t thisReceiverIndex = 3;
 // Structure to receive message
 typedef struct struct_message {
@@ -197,7 +209,25 @@ void processGamepad() {
 
   processTrimRight(receivedData.r1);
   processTrimLeft(receivedData.l1);
-
+  
+#ifdef ENABLE_SOUND
+  // Update sound system with throttle value
+  updateSoundSystem(abs(receivedData.axisY), receivedData.thumbL);
+  
+  // Start engine on first connection
+  if (!soundSystem.engineOn && connectionActive) {
+    startEngine();
+  }
+  // Stop engine when connection is lost
+  else if (soundSystem.engineOn && !connectionActive) {
+    stopEngine();
+  }
+  
+  // Play horn with L1 button
+  if (receivedData.l2) {
+    playHorn(true);
+  }
+#endif
 }
 void processControllers() {
   processGamepad();
@@ -234,6 +264,20 @@ void setup() {
       return;
   }
   esp_now_register_recv_cb(OnDataRecv);
+  
+#ifdef ENABLE_SOUND
+  // Initialize sound system
+  Serial.println("Initializing sound system...");
+  #ifdef ENABLE_BENFORD_SOUND
+    Serial.println("Loading Benford 3-Ton Dumper sounds...");
+    loadBenfordDumperSounds();
+  #else
+    Serial.println("Loading generic dump truck sounds...");
+    loadDumpTruckSounds();
+  #endif
+  initSoundSystem();
+  Serial.println("Sound system initialized");
+#endif
 
 }
 
