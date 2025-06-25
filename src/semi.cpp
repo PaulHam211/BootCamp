@@ -2,6 +2,9 @@
 #include <ESP32Servo.h>  // by Kevin Harrington
 #include <esp_now.h>
 #include <WiFi.h>
+#include "sounds/CarHorn.h"  // Horn sound data
+#include "sounds/DefenderV8OpenPipeStart.h"  // Engine start sound data
+#include "sounds/DefenderV8OpenPipeIdle.h"  // Engine idle sound data
 
 
 uint32_t thisReceiverIndex = 4;
@@ -74,6 +77,17 @@ Servo hitchServo;
 
 // Forward declarations
 void flashConnectionIndicator();
+void playStartupSound();
+void playIdleSound();
+
+// Timer and sound variables
+hw_timer_t *soundTimer = NULL;
+portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED;
+volatile uint32_t soundTimerTicks = 0;
+volatile uint32_t currentIdleSample = 0;
+volatile bool idleSoundActive = false;
+volatile uint32_t currentHornSample = 0;
+volatile bool hornActive = false;
 
 int lightSwitchButtonTime = 0;
 int lightSwitchTime = 0;
@@ -91,6 +105,10 @@ bool blinkLT = false;
 bool hazardLT = false;
 bool hazardsOn = false;
 bool smokeGenOn = false;
+bool hornPlaying = false;
+bool startupSoundPlaying = false;
+bool startupSoundPlayedThisConnection = false;
+bool idleSoundPlaying = false;
 bool trailerAuxMtr1Forward = false;
 bool trailerAuxMtr1Reverse = false;
 bool trailerAuxMtr2Forward = false;
@@ -120,7 +138,17 @@ void OnDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
       // Check if connection needs to be re-established
       if (!connectionActive) {
         connectionActive = true;
+        Serial.println("*** CONTROLLER CONNECTED ***");
         flashConnectionIndicator();
+        
+        // Play startup sound only once per connection
+        if (!startupSoundPlayedThisConnection && !hornPlaying && !startupSoundPlaying && !idleSoundPlaying) {
+          // Add a small delay after light flash, then play startup sound
+          delay(1000); // Wait 1 second after connection lights
+          Serial.println("Playing engine startup sound...");
+          playStartupSound();
+          startupSoundPlayedThisConnection = true;
+        }
       }
     }
 }
@@ -169,6 +197,159 @@ void moveServo(int movement, Servo &servo, int &servoValue) {
         delay(10);
       }
       break;
+  }
+}
+
+// Horn function - now triggers horn in timer interrupt
+void playHorn() {
+  if (hornPlaying || startupSoundPlaying) return; // Don't start new horn if already playing or during startup
+  
+  hornPlaying = true;
+  hornActive = true;
+  currentHornSample = 0;
+  
+  // Start timer if not already running for idle
+  if (!idleSoundActive) {
+    soundTimerTicks = 4000000 / 22050; // Same rate as idle for consistent mixing
+    timerAlarmWrite(soundTimer, soundTimerTicks, true);
+    timerAlarmEnable(soundTimer);
+  }
+  
+  // Wait for horn to finish playing
+  while (hornActive) {
+    vTaskDelay(1);
+  }
+  
+  hornPlaying = false;
+  
+  // Stop timer if idle sound isn't supposed to be playing
+  if (!idleSoundPlaying) {
+    timerAlarmDisable(soundTimer);
+  }
+}
+
+// Startup sound function - plays engine start sound using both DAC pins
+void playStartupSound() {
+  if (hornPlaying || startupSoundPlaying) return; // Allow during idle
+  
+  startupSoundPlaying = true;
+  
+  // Temporarily disable idle and horn during startup
+  bool wasIdleActive = idleSoundActive;
+  bool wasHornActive = hornActive;
+  if (wasIdleActive) {
+    idleSoundActive = false;
+    timerAlarmDisable(soundTimer);
+  }
+  if (wasHornActive) {
+    hornActive = false;
+  }
+  
+  // Play all startup samples
+  for (int i = 0; i < startSampleCount; i++) {
+    // Convert from signed char (-128 to 127) to unsigned DAC value (0-255)
+    int dacValue = (int)startSamples[i] + 128;
+    
+    // Apply volume scaling (adjust volume here if needed)
+    dacValue = (dacValue * 120) / 255; // 120/255 = ~47% volume (slightly quieter than horn)
+    
+    // Output to both DACs
+    dacWrite(auxAttach4, dacValue);  // Pin 25 (DAC1)
+    dacWrite(auxAttach5, dacValue);  // Pin 26 (DAC2)
+    
+    // Delay to control playback speed (~22kHz)
+    delayMicroseconds(45);
+  }
+  
+  startupSoundPlaying = false;
+  Serial.println("Engine startup sound complete");
+  
+  // Start idle sound after startup completes
+  idleSoundPlaying = true;
+  Serial.println("Starting engine idle sound...");
+}
+
+// Hardware timer interrupt for sound playback with mixing
+void IRAM_ATTR soundTimerISR() {
+  portENTER_CRITICAL_ISR(&timerMux);
+  
+  int finalDacValue = 128; // Start with silence (middle of DAC range)
+  
+  // Mix idle sound if active
+  if (idleSoundActive && !startupSoundPlaying) {
+    int idleDacValue = (int)samples[currentIdleSample] + 128;
+    idleDacValue = (idleDacValue * 120) / 255; // Reduce idle volume when mixing
+    finalDacValue = idleDacValue;
+    
+    // Move to next idle sample
+    currentIdleSample++;
+    if (currentIdleSample >= sampleCount) {
+      currentIdleSample = 0; // Loop back to beginning
+    }
+  }
+  
+  // Mix horn sound if active (horn takes priority in mix)
+  if (hornActive) {
+    int hornDacValue = (int)hornSamples[currentHornSample] + 128;
+    hornDacValue = (hornDacValue * 180) / 255; // Horn at higher volume
+    
+    // Simple audio mixing - average the two signals with horn emphasis
+    if (idleSoundActive && !startupSoundPlaying) {
+      finalDacValue = (finalDacValue + hornDacValue * 2) / 3; // Horn gets 2/3 weight
+    } else {
+      finalDacValue = hornDacValue;
+    }
+    
+    // Move to next horn sample
+    currentHornSample++;
+    if (currentHornSample >= hornSampleCount) {
+      hornActive = false; // Horn finished
+      currentHornSample = 0;
+    }
+  }
+  
+  // Clamp to valid DAC range
+  if (finalDacValue < 0) finalDacValue = 0;
+  if (finalDacValue > 255) finalDacValue = 255;
+  
+  // Output mixed audio to both DACs
+  dacWrite(auxAttach4, finalDacValue);  // Pin 25 (DAC1)
+  dacWrite(auxAttach5, finalDacValue);  // Pin 26 (DAC2)
+  
+  portEXIT_CRITICAL_ISR(&timerMux);
+}
+
+// Idle sound function - now just controls the timer
+void playIdleSound() {
+  if (!idleSoundPlaying || startupSoundPlaying) {
+    if (idleSoundActive) {
+      idleSoundActive = false;
+      // Only disable timer if horn isn't also using it
+      if (!hornActive) {
+        timerAlarmDisable(soundTimer);
+      }
+    }
+    return;
+  }
+  
+  if (!idleSoundActive) {
+    // Calculate timer ticks for correct sample rate
+    soundTimerTicks = 4000000 / sampleRate; // 4MHz / 22050 = ~181 ticks per sample
+    
+    // Start the timer
+    timerAlarmWrite(soundTimer, soundTimerTicks, true);
+    timerAlarmEnable(soundTimer);
+    idleSoundActive = true;
+    currentIdleSample = 0;
+    Serial.println("Engine idle timer started");
+  }
+}
+
+// Process horn input (left thumbstick press)
+void processHorn(bool buttonValue) {
+  if (buttonValue && !hornPlaying && !startupSoundPlaying) {
+    Serial.println("Horn activated!");
+    playHorn(); // Horn will now play over idle sound
   }
 }
 
@@ -267,9 +448,6 @@ void processSteering(int axisRXValue) {
   rawSteeringValue = 90 - (axisRXValue / 9); // Store raw steering value without trim
   adjustedSteeringValue = rawSteeringValue - steeringTrim; // Apply trim for actual steering
   frontSteeringServo.write(180 - adjustedSteeringValue);
-
-  Serial.print("Steering Value:");
-  Serial.println(adjustedSteeringValue);
 }
 
 void processLights(bool buttonValue) {
@@ -381,7 +559,8 @@ void processGamepad() {
   processTrimAndHitch(receivedData.dpad);
   //Lights
   processLights(receivedData.thumbR);
-  processSmokeGen(receivedData.thumbL);
+  //Horn (left thumbstick press)
+  processHorn(receivedData.thumbL);
   
   // Process speed mode toggle (Triangle button)
   processSpeedMode(receivedData.buttons);
@@ -455,7 +634,20 @@ void processControllers() {
 
 void setup() {
   Serial.begin(115200);
+  delay(1000); // Allow serial to initialize
+  
+  // Application introduction
+  Serial.println("==========================================");
+  Serial.println("   ESP32 Semi-Truck Controller v2.0");
+  Serial.println("   with Realistic Engine Sound System");
+  Serial.println("==========================================");
+  Serial.println("Initializing systems...");
 
+  // Initialize sound timer (Timer 0, prescaler 20, count up)
+  soundTimer = timerBegin(0, 20, true);
+  timerAttachInterrupt(soundTimer, &soundTimerISR, true);
+  Serial.println("Sound system initialized");
+  
   // Initialize connection variables
   connectionActive = false;
   lastPacketTime = 0;
@@ -491,6 +683,7 @@ void setup() {
   digitalWrite(LT1, LOW);
   digitalWrite(LT2, LOW);
   digitalWrite(LT3, LOW);
+  Serial.println("GPIO pins configured");
 
   frontSteeringServo.attach(frontSteeringServoPin);
   frontSteeringServo.write(adjustedSteeringValue);
@@ -499,15 +692,21 @@ void setup() {
   hitchUp = false; // Initialize hitchUp to match the actual servo position
   trailerRampUp = true; // Initialize ramp to up position by default
   trailerLegsUp = true; // Initialize legs to up position by default
+  Serial.println("Servos initialized");
 
     WiFi.setSleep(false);
   WiFi.mode(WIFI_STA);
+  Serial.println("WiFi configured in Station mode");
 
   if (esp_now_init() != ESP_OK) {
       Serial.println("Error initializing ESP-NOW");
       return;
   }
   esp_now_register_recv_cb(OnDataRecv);
+  Serial.println("ESP-NOW initialized successfully");
+  Serial.println("==========================================");
+  Serial.println("System ready! Waiting for controller...");
+  Serial.println("==========================================");
 }
 
 
@@ -520,9 +719,35 @@ void loop() {
   }
   else { vTaskDelay(1); }
 
+  // Process idle sound continuously (outside of dataUpdated check)
+  if (idleSoundPlaying && !startupSoundPlaying && connectionActive) {
+    playIdleSound();
+  }
+
   // Check for connection timeout
   if (connectionActive && (millis() - lastPacketTime > CONNECTION_TIMEOUT)) {
     connectionActive = false;
+    Serial.println("*** CONTROLLER DISCONNECTED ***");
+    Serial.println("Connection timeout - stopping all systems");
+    
+    // Reset sound states on disconnection
+    startupSoundPlayedThisConnection = false;
+    idleSoundPlaying = false;
+    hornPlaying = false;
+    startupSoundPlaying = false;
+    
+    // Stop idle sound timer
+    if (idleSoundActive) {
+      idleSoundActive = false;
+      timerAlarmDisable(soundTimer);
+      Serial.println("Engine sounds stopped");
+    }
+    
+    // Stop horn if active
+    if (hornActive) {
+      hornActive = false;
+    }
+    
     // Handle connection timeout (e.g., stop motors, reset values, etc.)
     digitalWrite(rearMotor0, LOW);
     digitalWrite(rearMotor1, LOW);
