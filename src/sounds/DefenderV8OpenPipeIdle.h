@@ -1,6 +1,6 @@
 const unsigned int sampleRate = 22050;
 const unsigned int sampleCount = 2971;
-const signed char samples[] = {//0
+const signed char idleSamples[] = {//0
 0, -1, -1, -1, -1, -1, 0, 0, 1, 2, 2, 4, 6, 8, 11, 13, //16
 15, 15, 15, 16, 18, 21, 22, 21, 20, 20, 20, 19, 17, 17, 17, 18, //32
 20, 23, 29, 31, 34, 36, 38, 40, 41, 40, 40, 41, 42, 43, 42, 40, //48
