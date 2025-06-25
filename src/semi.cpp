@@ -5,6 +5,7 @@
 #include "sounds/CarHorn.h"  // Horn sound data
 #include "sounds/DefenderV8OpenPipeStart.h"  // Engine start sound data
 #include "sounds/DefenderV8OpenPipeIdle.h"  // Engine idle sound data
+#include "sounds/DefenderV8OpenPipeRev.h"  // Engine rev sound data
 
 
 uint32_t thisReceiverIndex = 4;
@@ -88,6 +89,21 @@ volatile uint32_t currentIdleSample = 0;
 volatile bool idleSoundActive = false;
 volatile uint32_t currentHornSample = 0;
 volatile bool hornActive = false;
+volatile uint32_t currentRevSample = 0;
+volatile bool revSoundActive = false;
+
+// Rev sound configuration (based on Rc_Engine_Sound_ESP32 system)
+volatile int revVolumePercentage = 100; // Rev sound volume
+volatile int engineRevVolumePercentage = 80; // Engine volume when revving (increased from 60)
+volatile const uint16_t revSwitchPoint = 2; // Switch from idle to rev above this throttle point (lowered from 10)
+volatile const uint16_t idleEndPoint = 50; // Above this point: 100% rev, 0% idle (lowered from 300)
+volatile const uint16_t idleVolumeProportionPercentage = 90; // Idle proportion below revSwitchPoint
+
+// Throttle and RPM variables
+volatile int currentThrottle = 0;
+volatile int currentThrottleFaded = 0;
+volatile int throttleDependentVolume = 60;
+volatile int throttleDependentRevVolume = 60;
 
 int lightSwitchButtonTime = 0;
 int lightSwitchTime = 0;
@@ -144,7 +160,6 @@ void OnDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
         // Play startup sound only once per connection
         if (!startupSoundPlayedThisConnection && !hornPlaying && !startupSoundPlaying && !idleSoundPlaying) {
           // Add a small delay after light flash, then play startup sound
-          delay(1000); // Wait 1 second after connection lights
           Serial.println("Playing engine startup sound...");
           playStartupSound();
           startupSoundPlayedThisConnection = true;
@@ -277,8 +292,8 @@ void IRAM_ATTR soundTimerISR() {
   
   // Mix idle sound if active
   if (idleSoundActive && !startupSoundPlaying) {
-    int idleDacValue = (int)samples[currentIdleSample] + 128;
-    idleDacValue = (idleDacValue * 120) / 255; // Reduce idle volume when mixing
+    int idleDacValue = (int)idleSamples[currentIdleSample] + 128;
+    idleDacValue = (idleDacValue * throttleDependentVolume) / 255;
     finalDacValue = idleDacValue;
     
     // Move to next idle sample
@@ -288,13 +303,49 @@ void IRAM_ATTR soundTimerISR() {
     }
   }
   
+  // Mix rev sound if active
+  if (revSoundActive && !startupSoundPlaying) {
+    int revDacValue = (int)revSamples[currentRevSample] + 128;
+    revDacValue = (revDacValue * throttleDependentRevVolume) / 200; // Changed divisor from 255 to 200 for louder rev
+    
+    // Mix with idle or replace idle based on throttle
+    if (idleSoundActive) {
+      // Calculate mixing ratio based on throttle
+      int idleWeight = 100;
+      int revWeight = 0;
+      
+      if (currentThrottle > revSwitchPoint) {
+        if (currentThrottle < idleEndPoint) {
+          // Gradual transition from idle to rev
+          revWeight = map(currentThrottle, revSwitchPoint, idleEndPoint, 0, 100);
+          idleWeight = 100 - revWeight;
+        } else {
+          // Full rev, no idle
+          revWeight = 100;
+          idleWeight = 0;
+        }
+      }
+      
+      // Apply mixing
+      finalDacValue = (finalDacValue * idleWeight + revDacValue * revWeight) / 100;
+    } else {
+      finalDacValue = revDacValue;
+    }
+    
+    // Move to next rev sample
+    currentRevSample++;
+    if (currentRevSample >= revSampleCount) {
+      currentRevSample = 0; // Loop back to beginning
+    }
+  }
+  
   // Mix horn sound if active (horn takes priority in mix)
   if (hornActive) {
     int hornDacValue = (int)hornSamples[currentHornSample] + 128;
     hornDacValue = (hornDacValue * 180) / 255; // Horn at higher volume
     
     // Simple audio mixing - average the two signals with horn emphasis
-    if (idleSoundActive && !startupSoundPlaying) {
+    if (idleSoundActive || revSoundActive) {
       finalDacValue = (finalDacValue + hornDacValue * 2) / 3; // Horn gets 2/3 weight
     } else {
       finalDacValue = hornDacValue;
@@ -324,8 +375,8 @@ void playIdleSound() {
   if (!idleSoundPlaying || startupSoundPlaying) {
     if (idleSoundActive) {
       idleSoundActive = false;
-      // Only disable timer if horn isn't also using it
-      if (!hornActive) {
+      // Only disable timer if horn and rev aren't also using it
+      if (!hornActive && !revSoundActive) {
         timerAlarmDisable(soundTimer);
       }
     }
@@ -350,6 +401,68 @@ void processHorn(bool buttonValue) {
   if (buttonValue && !hornPlaying && !startupSoundPlaying) {
     Serial.println("Horn activated!");
     playHorn(); // Horn will now play over idle sound
+  }
+}
+
+// Update throttle value and calculate engine sound volumes
+void updateThrottle(int axisYValue) {
+  // Map joystick input to throttle range (0-100, better for small joystick values)
+  if (abs(axisYValue) > 50) { // Lower threshold for detection
+    currentThrottle = map(abs(axisYValue), 50, 600, 0, 100); // Map 50-600 range to 0-100
+    currentThrottle = constrain(currentThrottle, 0, 100);
+  } else {
+    currentThrottle = 0; // Idle
+  }
+  
+  // Smooth throttle changes (fading)
+  static unsigned long lastThrottleUpdate = 0;
+  if (millis() - lastThrottleUpdate > 5) { // Update every 5ms
+    if (currentThrottleFaded < currentThrottle && currentThrottleFaded < 99) {
+      currentThrottleFaded += 2; // Acceleration rate
+    }
+    if (currentThrottleFaded > currentThrottle && currentThrottleFaded > 1) {
+      currentThrottleFaded -= 1; // Deceleration rate
+    }
+    lastThrottleUpdate = millis();
+  }
+  
+  // Calculate throttle dependent volumes
+  if (connectionActive && idleSoundPlaying) {
+    // Idle volume decreases as throttle increases
+    throttleDependentVolume = map(currentThrottleFaded, 0, 100, 120, 60); // 120 at idle, 60 at full throttle
+    
+    // Rev volume increases with throttle
+    throttleDependentRevVolume = map(currentThrottleFaded, 0, 100, engineRevVolumePercentage, 180); // Increased max from 150 to 180
+    
+    // Start rev sound if throttle is above switch point
+    if (currentThrottle > revSwitchPoint && !revSoundActive) {
+      revSoundActive = true;
+      currentRevSample = 0;
+      
+      // Make sure timer is running for rev sound
+      if (!idleSoundActive && !hornActive) {
+        soundTimerTicks = 4000000 / revSampleRate; // Use rev sample rate
+        timerAlarmWrite(soundTimer, soundTimerTicks, true);
+        timerAlarmEnable(soundTimer);
+      }
+      
+      Serial.print("*** ENGINE REVVING STARTED! Throttle: ");
+      Serial.print(currentThrottle);
+      Serial.print(", Rev Vol: ");
+      Serial.println(throttleDependentRevVolume);
+    }
+    
+    // Stop rev sound if throttle drops below switch point
+    if (currentThrottle <= revSwitchPoint && revSoundActive) {
+      revSoundActive = false;
+      Serial.print("*** ENGINE BACK TO IDLE! Throttle: ");
+      Serial.println(currentThrottle);
+      
+      // Stop timer if nothing else is using it
+      if (!idleSoundActive && !hornActive) {
+        timerAlarmDisable(soundTimer);
+      }
+    }
   }
 }
 
@@ -404,6 +517,9 @@ void processSpeedMode(int value) {
 }
 
 void processThrottle(int axisYValue) {
+  // Update engine sound based on throttle
+  updateThrottle(axisYValue);
+  
   int adjustedThrottleValue = axisYValue / 2;
   
   // Apply 50% speed reduction if reduced speed mode is enabled
@@ -747,6 +863,15 @@ void loop() {
     if (hornActive) {
       hornActive = false;
     }
+    
+    // Stop rev sound if active
+    if (revSoundActive) {
+      revSoundActive = false;
+    }
+    
+    // Reset throttle values
+    currentThrottle = 0;
+    currentThrottleFaded = 0;
     
     // Handle connection timeout (e.g., stop motors, reset values, etc.)
     digitalWrite(rearMotor0, LOW);
