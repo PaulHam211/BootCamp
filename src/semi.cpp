@@ -93,11 +93,11 @@ volatile uint32_t currentRevSample = 0;
 volatile bool revSoundActive = false;
 
 // Rev sound configuration (based on Rc_Engine_Sound_ESP32 system)
-volatile int revVolumePercentage = 120; // Rev sound volume
-volatile int engineRevVolumePercentage = 50; // Engine volume when revving (increased from 80)
-volatile const uint16_t revSwitchPoint = 10; // Switch from idle to rev above this throttle point (increased from 2)
-volatile const uint16_t idleEndPoint = 70; // Above this point: 100% rev, 0% idle (increased from 50)
-volatile const uint16_t idleVolumeProportionPercentage = 75; // Idle proportion below revSwitchPoint (reduced from 90)
+volatile int revVolumePercentage = 150; // Rev sound volume
+volatile int engineRevVolumePercentage = 50; // Engine volume when revving
+volatile const uint16_t revSwitchPoint = 3; // Switch from idle to rev above this throttle point
+volatile const uint16_t idleEndPoint = 50; // Above this point: 100% rev, 0% idle 
+volatile const uint16_t idleVolumeProportionPercentage = 90; // Idle proportion below revSwitchPoint 
 
 // Throttle and RPM variables
 volatile int currentThrottle = 0;
@@ -133,10 +133,13 @@ bool hitchUp = true;
 bool trailerRampUp = true;
 bool trailerLegsUp = true;
 bool reducedSpeedMode = false;
+bool soundsEnabled = true; // Toggle for engine sounds
 unsigned long speedModeButtonTime = 0;
+unsigned long soundToggleButtonTime = 0;
 unsigned long rampButtonTime = 0;
 unsigned long legsButtonTime = 0;
 const int speedModeDebounceDelay = 500; // Debounce delay for speed mode toggle
+const int soundToggleDebounceDelay = 500; // Debounce delay for sound toggle
 const int rampDebounceDelay = 500; // Debounce delay for ramp toggle
 const int legsDebounceDelay = 500; // Debounce delay for legs toggle
 
@@ -157,8 +160,8 @@ void OnDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
         Serial.println("*** CONTROLLER CONNECTED ***");
         flashConnectionIndicator();
         
-        // Play startup sound only once per connection
-        if (!startupSoundPlayedThisConnection && !hornPlaying && !startupSoundPlaying && !idleSoundPlaying) {
+        // Play startup sound only once per connection (if sounds are enabled)
+        if (soundsEnabled && !startupSoundPlayedThisConnection && !hornPlaying && !startupSoundPlaying && !idleSoundPlaying) {
           // Add a small delay after light flash, then play startup sound
           Serial.println("Playing engine startup sound...");
           playStartupSound();
@@ -217,7 +220,7 @@ void moveServo(int movement, Servo &servo, int &servoValue) {
 
 // Horn function - now triggers horn in timer interrupt
 void playHorn() {
-  if (hornPlaying || startupSoundPlaying) return; // Don't start new horn if already playing or during startup
+  if (!soundsEnabled || hornPlaying || startupSoundPlaying) return; // Don't start if sounds disabled or already playing
   
   hornPlaying = true;
   hornActive = true;
@@ -372,7 +375,7 @@ void IRAM_ATTR soundTimerISR() {
 
 // Idle sound function - now just controls the timer
 void playIdleSound() {
-  if (!idleSoundPlaying || startupSoundPlaying) {
+  if (!soundsEnabled || !idleSoundPlaying || startupSoundPlaying) {
     if (idleSoundActive) {
       idleSoundActive = false;
       // Only disable timer if horn and rev aren't also using it
@@ -427,7 +430,7 @@ void updateThrottle(int axisYValue) {
   }
   
   // Calculate throttle dependent volumes
-  if (connectionActive && idleSoundPlaying) {
+  if (connectionActive && idleSoundPlaying && soundsEnabled) {
     // Idle volume decreases as throttle increases
     throttleDependentVolume = map(currentThrottleFaded, 0, 100, 120, 60); // 120 at idle, 60 at full throttle
     
@@ -506,6 +509,45 @@ void processSpeedMode(int value) {
     Serial.print("Speed Mode: ");
     Serial.println(reducedSpeedMode ? "Reduced (50%)" : "Normal (100%)");
     speedModeButtonTime = millis();
+  }
+}
+
+void processSoundToggle(int value) {
+  // Square button toggles engine sounds with debouncing
+  if ((value & buttonMaskX) && (millis() - soundToggleButtonTime > soundToggleDebounceDelay)) {
+    soundsEnabled = !soundsEnabled; // Toggle the sound state
+    Serial.print("Engine Sounds: ");
+    Serial.println(soundsEnabled ? "ON" : "OFF");
+    
+    // If sounds are being disabled, stop all active sounds
+    if (!soundsEnabled) {
+      if (idleSoundActive) {
+        idleSoundActive = false;
+      }
+      if (revSoundActive) {
+        revSoundActive = false;
+      }
+      if (hornActive) {
+        hornActive = false;
+      }
+      // Stop the timer if no sounds are active
+      timerAlarmDisable(soundTimer);
+      
+      // Reset sound flags
+      idleSoundPlaying = false;
+      startupSoundPlaying = false;
+      hornPlaying = false;
+      
+      Serial.println("All engine sounds stopped");
+    } else {
+      // If sounds are being enabled and we're connected, start idle sound
+      if (connectionActive && !startupSoundPlaying && !hornPlaying) {
+        idleSoundPlaying = true;
+        Serial.println("Engine sounds re-enabled - starting idle");
+      }
+    }
+    
+    soundToggleButtonTime = millis();
   }
 }
 
@@ -673,6 +715,9 @@ void processGamepad() {
   
   // Process speed mode toggle (Triangle button)
   processSpeedMode(receivedData.buttons);
+  
+  // Process sound toggle (Square button)
+  processSoundToggle(receivedData.buttons);
 
   processTrailerLegs(receivedData.buttons);
   processTrailerRamp(receivedData.buttons);
@@ -829,7 +874,7 @@ void loop() {
   else { vTaskDelay(1); }
 
   // Process idle sound continuously (outside of dataUpdated check)
-  if (idleSoundPlaying && !startupSoundPlaying && connectionActive) {
+  if (soundsEnabled && idleSoundPlaying && !startupSoundPlaying && connectionActive) {
     playIdleSound();
   }
 
