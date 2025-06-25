@@ -2,10 +2,10 @@
 #include <ESP32Servo.h>  // by Kevin Harrington
 #include <esp_now.h>
 #include <WiFi.h>
-#include "sounds/CarHorn.h"  // Horn sound data
-#include "sounds/DefenderV8OpenPipeStart.h"  // Engine start sound data
-#include "sounds/DefenderV8OpenPipeIdle.h"  // Engine idle sound data
-#include "sounds/DefenderV8OpenPipeRev.h"  // Engine rev sound data
+#include "sounds/horn.h"  // Horn sound data
+#include "sounds/start.h"  // Engine start sound data
+#include "sounds/idle.h"  // Engine idle sound data
+#include "sounds/rev.h"  // Engine rev sound data
 
 
 uint32_t thisReceiverIndex = 4;
