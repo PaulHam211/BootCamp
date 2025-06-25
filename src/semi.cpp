@@ -93,11 +93,11 @@ volatile uint32_t currentRevSample = 0;
 volatile bool revSoundActive = false;
 
 // Rev sound configuration (based on Rc_Engine_Sound_ESP32 system)
-volatile int revVolumePercentage = 100; // Rev sound volume
-volatile int engineRevVolumePercentage = 80; // Engine volume when revving (increased from 60)
-volatile const uint16_t revSwitchPoint = 2; // Switch from idle to rev above this throttle point (lowered from 10)
-volatile const uint16_t idleEndPoint = 50; // Above this point: 100% rev, 0% idle (lowered from 300)
-volatile const uint16_t idleVolumeProportionPercentage = 90; // Idle proportion below revSwitchPoint
+volatile int revVolumePercentage = 120; // Rev sound volume
+volatile int engineRevVolumePercentage = 50; // Engine volume when revving (increased from 80)
+volatile const uint16_t revSwitchPoint = 10; // Switch from idle to rev above this throttle point (increased from 2)
+volatile const uint16_t idleEndPoint = 70; // Above this point: 100% rev, 0% idle (increased from 50)
+volatile const uint16_t idleVolumeProportionPercentage = 75; // Idle proportion below revSwitchPoint (reduced from 90)
 
 // Throttle and RPM variables
 volatile int currentThrottle = 0;
@@ -292,7 +292,7 @@ void IRAM_ATTR soundTimerISR() {
   
   // Mix idle sound if active
   if (idleSoundActive && !startupSoundPlaying) {
-    int idleDacValue = (int)idleSamples[currentIdleSample] + 128;
+    int idleDacValue = (int)samples[currentIdleSample] + 128;
     idleDacValue = (idleDacValue * throttleDependentVolume) / 255;
     finalDacValue = idleDacValue;
     
@@ -306,7 +306,7 @@ void IRAM_ATTR soundTimerISR() {
   // Mix rev sound if active
   if (revSoundActive && !startupSoundPlaying) {
     int revDacValue = (int)revSamples[currentRevSample] + 128;
-    revDacValue = (revDacValue * throttleDependentRevVolume) / 200; // Changed divisor from 255 to 200 for louder rev
+    revDacValue = (revDacValue * throttleDependentRevVolume) / 180; // Improved divisor for better rev volume
     
     // Mix with idle or replace idle based on throttle
     if (idleSoundActive) {
@@ -317,17 +317,17 @@ void IRAM_ATTR soundTimerISR() {
       if (currentThrottle > revSwitchPoint) {
         if (currentThrottle < idleEndPoint) {
           // Gradual transition from idle to rev
-          revWeight = map(currentThrottle, revSwitchPoint, idleEndPoint, 0, 100);
-          idleWeight = 100 - revWeight;
+          revWeight = map(currentThrottle, revSwitchPoint, idleEndPoint, 20, 100); // Start rev at 20% minimum
+          idleWeight = map(currentThrottle, revSwitchPoint, idleEndPoint, idleVolumeProportionPercentage, 0);
         } else {
-          // Full rev, no idle
+          // Full rev, minimal idle for base tone
           revWeight = 100;
-          idleWeight = 0;
+          idleWeight = 10; // Keep some idle for base tone
         }
       }
       
-      // Apply mixing
-      finalDacValue = (finalDacValue * idleWeight + revDacValue * revWeight) / 100;
+      // Apply mixing with emphasis on rev sound
+      finalDacValue = (finalDacValue * idleWeight + revDacValue * revWeight) / (idleWeight + revWeight);
     } else {
       finalDacValue = revDacValue;
     }
@@ -445,18 +445,11 @@ void updateThrottle(int axisYValue) {
         timerAlarmWrite(soundTimer, soundTimerTicks, true);
         timerAlarmEnable(soundTimer);
       }
-      
-      Serial.print("*** ENGINE REVVING STARTED! Throttle: ");
-      Serial.print(currentThrottle);
-      Serial.print(", Rev Vol: ");
-      Serial.println(throttleDependentRevVolume);
     }
     
     // Stop rev sound if throttle drops below switch point
     if (currentThrottle <= revSwitchPoint && revSoundActive) {
       revSoundActive = false;
-      Serial.print("*** ENGINE BACK TO IDLE! Throttle: ");
-      Serial.println(currentThrottle);
       
       // Stop timer if nothing else is using it
       if (!idleSoundActive && !hornActive) {
