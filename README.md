@@ -294,7 +294,7 @@ You can replace the default engine sounds with custom sounds from the [Rc_Engine
 
 1. **Download Sound Files**: 
    - Visit [TheDIYGuy999/Rc_Engine_Sound_ESP32](https://github.com/TheDIYGuy999/Rc_Engine_Sound_ESP32)
-   - Navigate to the `/src/cehicles/sounds` directory
+   - Navigate to the `/src/vehicles/sounds` directory
    - Browse and select your preferred engine sound set (e.g., DefenderV8, Mustang, Semi, etc.)
 
 2. **Replace Header Files**:
