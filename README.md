@@ -239,6 +239,103 @@ The original project used Arduino `.ino` files with direct Bluetooth controller 
 
 **Pin assignments for each vehicle type are documented in the respective source files and ProfessorBoots' vehicle designs.**
 
+## Sound System (Semi-Truck)
+
+The BootCamp project now features a realistic sound system for the semi-truck, with plans to extend to other vehicles in the future. This system provides engine startup, idle, revving, and horn sounds using the ESP32's DAC capabilities.
+
+### Sound Features
+
+- **Engine Startup Sound**: Plays automatically when controller connects to the vehicle
+- **Engine Idle Sound**: Continuous background engine noise
+- **Engine Revving**: Throttle-dependent engine revving when accelerating
+- **Horn**: Press left thumbstick to activate horn
+- **Sound Toggle**: Press Square button (PS4) to toggle sounds on/off
+
+### Implementation Details
+
+The sound system uses two key components:
+1. **Hardware Timer Interrupt**: For consistent, high-quality audio playback
+2. **Audio Mixing**: Multiple sound samples mixed in real-time
+
+Sound files are stored as raw 8-bit PCM data in header files:
+- `sounds/start.h` - Engine startup sound
+- `sounds/idle.h` - Engine idle loop
+- `sounds/rev.h` - Engine revving sound
+- `sounds/horn.h` - Horn sound
+
+### Sound Configuration Parameters
+
+```cpp
+// Rev sound configuration
+volatile int revVolumePercentage = 150;         // Rev sound volume
+volatile int engineRevVolumePercentage = 50;    // Engine idle volume when revving
+volatile const uint16_t revSwitchPoint = 3;     // Throttle threshold to start rev sound
+volatile const uint16_t idleEndPoint = 50;      // Throttle point for 100% rev, 0% idle
+volatile const uint16_t idleVolumeProportionPercentage = 90; // Idle volume proportion
+```
+
+### Hardware Connections
+
+The semi-truck sound system uses the ESP32's built-in DAC pins:
+- **DAC1** (Pin 25, auxAttach4): Audio output
+- **DAC2** (Pin 26, auxAttach5): Audio output (duplicated for stereo-like effect)
+
+#### Audio Output Schematic
+
+![](Schematic.png)
+
+**Note:** The current revving implementation is functional but needs further tuning for more realistic engine sound. Future updates will improve this aspect.
+
+### Customizing Engine Sounds
+
+You can replace the default engine sounds with custom sounds from the [Rc_Engine_Sound_ESP32](https://github.com/TheDIYGuy999/Rc_Engine_Sound_ESP32) repository, which offers a variety of realistic engine sounds.
+
+#### Steps to Change Sound Files:
+
+1. **Download Sound Files**: 
+   - Visit [TheDIYGuy999/Rc_Engine_Sound_ESP32](https://github.com/TheDIYGuy999/Rc_Engine_Sound_ESP32)
+   - Navigate to the `/src/cehicles/sounds` directory
+   - Browse and select your preferred engine sound set (e.g., DefenderV8, Mustang, Semi, etc.)
+
+2. **Replace Header Files**:
+   - Copy the selected engine's `.h` files:
+     - `[ENGINE]_idle.h` → rename to `idle.h`
+     - `[ENGINE]_rev.h` → rename to `rev.h`
+     - `[ENGINE]_start.h` → rename to `start.h`
+   - Place these files in the `src/sounds/` directory of your BootCamp project
+
+3. **Update Sample Rates** (if required):
+   - If changing to a sound with a different sample rate, update these variables:
+   ```cpp
+   #define sampleRate 22050    // Sample rate for idle sound
+   #define revSampleRate 22050 // Sample rate for rev sound
+   ```
+
+4. **Adjust Sound Parameters**:
+   - Fine-tune parameters in `semi.cpp` for the new sounds:
+   ```cpp
+   // Increase/decrease volume
+   volatile int revVolumePercentage = 150;
+   
+   // Change the throttle threshold to trigger rev sound
+   volatile const uint16_t revSwitchPoint = 3;
+   
+   // Adjust crossfade between idle and rev sounds
+   volatile const uint16_t idleEndPoint = 50;
+   volatile const uint16_t idleVolumeProportionPercentage = 90;
+   ```
+
+5. **Rebuild and Upload**:
+   ```bash
+   pio run -e semi --target upload
+   ```
+
+#### Notes on Sound Files:
+
+- Sound files are raw 8-bit PCM data stored as C arrays
+- Each engine in the Rc_Engine_Sound_ESP32 repository has a distinct character
+- Higher sample rates (22050Hz) provide better quality but use more memory
+
 ## Safety Considerations
 
 - **Always test in safe environment** before full operation
